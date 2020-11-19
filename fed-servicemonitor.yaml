@@ -1,0 +1,52 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cluster-one-nodes
+  labels:
+    app: cluster-one-nodes
+  namespace: cattle-monitoring-system
+spec:
+  endpoints:
+    - interval: 1m
+      honorLabels: true
+      scrapeTimeout: 55s
+      path: "/metrics"
+      port: metrics
+  namespaceSelector:
+    matchNames:
+      - cattle-monitoring-system
+  selector:
+    matchLabels:
+      app: cluster-one-nodes
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-one-nodes
+  labels:
+    app: cluster-one-nodes
+  namespace: cattle-monitoring-system
+spec:
+  type: ExternalName
+  externalName: 3.127.25.239
+  clusterIP: ""
+  ports:
+    - port: 9100
+      targetPort: 9100
+      name: metrics
+      protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: cluster-one-nodes
+  labels:
+    app: cluster-one-nodes
+  namespace: cattle-monitoring-system
+subsets:
+  - addresses:
+      - ip: 3.127.25.239
+    ports:
+      - port: 9100
+        name: metrics
+        protocol: TCP

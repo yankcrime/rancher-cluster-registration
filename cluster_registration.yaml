@@ -1,0 +1,204 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: node-exporter
+  namespace: kube-system
+spec:
+  chart: prometheus-node-exporter
+  repo: https://prometheus-community.github.io/helm-charts
+  targetNamespace: monitoring
+  valuesContent: |-
+    service:
+      type: NodePort
+      nodePort: 30091
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: kube-state-metrics
+  namespace: kube-system
+spec:
+  chart: kube-state-metrics
+  repo: https://charts.helm.sh/stable
+  targetNamespace: monitoring
+  valuesContent: |-
+    service:
+      type: NodePort
+      nodePort: 30080
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  namespace: default
+  name: cluster-registration
+stringData:
+  RANCHER_BEARER_TOKEN: ...
+  RANCHER_HOSTNAME: ...
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: default
+  name: cluster-registration
+data:
+  service-monitor.yaml: |
+    apiVersion: monitoring.coreos.com/v1
+    kind: ServiceMonitor
+    metadata:
+      name: ${CLUSTER_NAME}
+      labels:
+        cluster: ${CLUSTER_NAME}
+      namespace: cattle-monitoring-system
+    spec:
+      endpoints:
+        - interval: 1m
+          honorLabels: true
+          scrapeTimeout: 55s
+          path: "/metrics"
+          port: node-exporter
+        - interval: 1m
+          honorLabels: true
+          scrapeTimeout: 55s
+          path: "/metrics"
+          port: kube-state-metrics
+      namespaceSelector:
+        matchNames:
+          - cattle-monitoring-system
+      selector:
+        matchLabels:
+          cluster: ${CLUSTER_NAME}
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: ${CLUSTER_NAME}
+      labels:
+        cluster: ${CLUSTER_NAME}
+      namespace: cattle-monitoring-system
+    spec:
+      type: ExternalName
+      externalName: ${EXTERNAL_IP}
+      clusterIP: ""
+      ports:
+        - port: 9100
+          targetPort: 9100
+          name: node-exporter
+          protocol: TCP
+        - port: 30080
+          targetPort: 30080
+          name: kube-state-metrics
+          protocol: TCP
+    ---
+    apiVersion: v1
+    kind: Endpoints
+    metadata:
+      name: ${CLUSTER_NAME}
+      labels:
+        cluster: ${CLUSTER_NAME}
+      namespace: cattle-monitoring-system
+    subsets:
+      - addresses:
+          - ip: ${EXTERNAL_IP}
+        ports:
+          - port: 9100
+            name: node-exporter
+            protocol: TCP
+          - port: 30080
+            name: kube-state-metrics
+            protocol: TCP
+  cluster-registration.sh: |
+    #!/usr/bin/env bash
+
+    set -xe
+
+    if ! kubectl get namespace cattle-system; then
+      cluster=$(curl --insecure "https://${RANCHER_HOSTNAME}/v3/cluster?_replace=true" \
+      -X 'POST' \
+      -u "${RANCHER_BEARER_TOKEN}" \
+      -H 'Content-Type: application/json' \
+      -H 'Accept: application/json' \
+      --data-binary "{\"name\":\"${CLUSTER_NAME}\"}")
+
+      cluster_id=$(echo ${cluster} | jq -r '.id')
+
+      sleep 10
+
+      registration_token=$(curl --insecure "https://${RANCHER_HOSTNAME}/v3/clusterregistrationtoken" \
+      -X 'POST' \
+      -u "${RANCHER_BEARER_TOKEN}" \
+      -H 'Content-Type: application/json' \
+      -H 'Accept: application/json' \
+      --data-binary "{\"type\":\"clusterRegistrationToken\",\"clusterId\":\"${cluster_id}\"}")
+
+      cmd=$(echo ${registration_token} | jq -r '.insecureCommand')
+
+      bash -c "${cmd}"
+    fi
+
+    export EXTERNAL_IP=$(kubectl get node -o jsonpath="{.items[0].status.addresses}" | jq -r '.[] | select(.type == "InternalIP") | .address')
+
+    service_monitor_yaml=$(jo yaml="$(cat /app/service-monitor.yaml| envsubst)")
+
+    curl --insecure "https://${RANCHER_HOSTNAME}/v3/clusters/c-2t46z?action=importYaml" \
+    -X 'POST' \
+    -u "${RANCHER_BEARER_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    --data-binary "${service_monitor_yaml}"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-registration
+subjects:
+- kind: ServiceAccount
+  name: cluster-registration
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: default
+  name: cluster-registration
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: default
+  name: cluster-registration
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: cluster-registration
+      restartPolicy: Never
+      containers:
+        - name: cluster-registration
+          image: bashofmann/kubectl-jq:latest
+          command:
+            - bash
+            - /app/cluster-registration.sh
+          volumeMounts:
+            - mountPath: /app
+              name: script
+          env:
+            - name: CLUSTER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          envFrom:
+            - secretRef:
+                name: cluster-registration
+      volumes:
+        - name: script
+          configMap:
+            name: cluster-registration
