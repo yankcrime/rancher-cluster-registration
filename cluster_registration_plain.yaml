@@ -4,8 +4,9 @@ metadata:
   namespace: kube-system
   name: cluster-registration
 stringData:
-  RANCHER_BEARER_TOKEN: ...
-  RANCHER_HOSTNAME: ...
+  RANCHER_BEARER_TOKEN: "..."
+  RANCHER_HOSTNAME: "..."
+  CLUSTER_NAME: "..."
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -19,9 +20,9 @@ data:
     set -xe
 
     if ! kubectl get namespace cattle-system; then
-      cluster=$(curl --insecure "https://${RANCHER_HOSTNAME}/v3/cluster?_replace=true" \
+      cluster=$(curl --insecure "https://${RANCHER_HOSTNAME}/v3/clusters" \
       -X 'POST' \
-      -u "${RANCHER_BEARER_TOKEN}" \
+      -H "Authorization: Bearer ${RANCHER_BEARER_TOKEN}" \
       -H 'Content-Type: application/json' \
       -H 'Accept: application/json' \
       --data-binary "{\"name\":\"${CLUSTER_NAME}\"}")
@@ -32,7 +33,7 @@ data:
 
       registration_token=$(curl --insecure "https://${RANCHER_HOSTNAME}/v3/clusterregistrationtoken" \
       -X 'POST' \
-      -u "${RANCHER_BEARER_TOKEN}" \
+      -H "Authorization: Bearer ${RANCHER_BEARER_TOKEN}" \
       -H 'Content-Type: application/json' \
       -H 'Accept: application/json' \
       --data-binary "{\"type\":\"clusterRegistrationToken\",\"clusterId\":\"${cluster_id}\"}")
@@ -74,16 +75,13 @@ spec:
       restartPolicy: Never
       containers:
         - name: cluster-registration
-          image: bashofmann/kubectl-jq:latest
+          image: yankcrime/kubectl-jq:latest
           command:
             - bash
             - /app/cluster-registration.sh
           volumeMounts:
             - mountPath: /app
               name: script
-          env:
-            - name: CLUSTER_NAME
-              value: cluster-name-edge
           envFrom:
             - secretRef:
                 name: cluster-registration
